@@ -122,12 +122,58 @@ class TestMetrics(unittest.TestCase):
         S = [np.array(v) for v in ([1.0, 0.5, 0.2], [0.1, 0.5, 0.2], [0.5, 0.5, 0.2], [0.3, 0.1, 0.9])]
         r = summarize(items, {(2048, "turn", "clm", "mutation"): S}, {"clm": 10.0}, Args)[0]
         self.assertAlmostEqual(r["top1"], (1 + 0 + 0.5 + 0) / 4)          # a tie at the top counts 1/2
-        self.assertAlmostEqual(r["pairwise"], (1 + 0 + 0.75 + 0.5) / 4)   # a tied negative counts 1/2
+        self.assertAlmostEqual(r["pairwise"], (2 + 0 + 1.5 + 1) / 8)      # per negative; a tied negative counts 1/2
         self.assertAlmostEqual(r["mrr"], (1 + 1 / 3 + 2 / 3 + 1 / 2) / 4)
         self.assertAlmostEqual(r["by_op"]["edit.path"]["pairwise"], 0.625)
         self.assertAlmostEqual(r["by_op"]["edit.range"]["pairwise"], 0.5)
         self.assertAlmostEqual(r["chance"], 1 / 3)
         self.assertTrue(r["pairwise_ci"][0] <= r["pairwise"] <= r["pairwise_ci"][1])
+
+
+class TestDecision(unittest.TestCase):
+    """the README rule end to end on made-up outputs: 40 steps, each true action against one other-file view
+    (edit.path) and one flipped edit (edit.new.flip)"""
+
+    def run_rule(self, flip_scores, path_label):
+        import contextlib, csv, gzip, io, tempfile
+        from precheck.analyze import decide
+        from precheck.audit import COLUMNS
+        with tempfile.TemporaryDirectory() as tmp:
+            f = os.path.join(tmp, "t.json")
+            res = [dict(max_len=L, format="turn", scorer="clm", kind="neighbour", pairwise=p) for L, p in ((8192, 0.8), (2048, 0.7))]
+            res.append(dict(max_len=8192, format="turn", scorer="clm", kind="random", top1=0.95))
+            with open(f, "w") as h: json.dump({"kind": "clm_precheck", "results": res}, h)
+            with gzip.open(f[:-5] + "_items.jsonl.gz", "wt") as g, open(f[:-5] + "_audit.csv", "w", newline="") as a:
+                w = csv.DictWriter(a, COLUMNS); w.writeheader()
+                for i in range(40):
+                    sid = f"t{i}:5"; s = [0.5, 0.6, flip_scores]    # the true action loses to the other file
+                    sets = {"mutation": {"ops": ["true", "edit.path", "edit.new.flip"], "scores": {"8192|turn|clm": s, "8192|turn|raw": s, "0|turn|lexical": s}}}
+                    g.write(json.dumps({"sid": sid, "instance": f"inst{i}", "sets": sets}) + "\n")
+                    w.writerow({"sid": sid, "cand": "m1", "op": "edit.path", "label_a": path_label})
+                    w.writerow({"sid": sid, "cand": "m2", "op": "edit.new.flip", "label_a": "worse", "label_b": "worse" if i < 15 else ""})
+            out = io.StringIO()
+            with open(f) as h, contextlib.redirect_stdout(out): verdict = decide(f, json.load(h))
+            return verdict, out.getvalue()
+
+    def test_go_when_clm_misses_clean_negatives(self):
+        verdict, log = self.run_rule(flip_scores=0.9, path_label="worse")   # CLM loses every pair, all negatives worse
+        self.assertEqual(verdict, "GO", log)
+
+    def test_stop_when_only_equivalent_negatives_beat_clm(self):
+        verdict, log = self.run_rule(flip_scores=0.1, path_label="same")    # CLM loses only to views as good as the true one
+        self.assertEqual(verdict, "STOP", log)
+        self.assertIn("edit.path: q 1.00", log)                            # flagged and excluded
+        self.assertIn("agreement 1.00", log)
+
+    def test_audit_sheet_from_examples(self):
+        import tempfile
+        from precheck.audit import parse_examples
+        md = ("# x\n## abc:12  (editor.view, 900 state tokens)\n\nTask:\n~~~~text\n## fake:1  (a, 1 state tokens)\n- m1 `edit.path` +0.100\n~~~~\n"
+              "**mutation**\n\n- m0 `true` +0.300\n  ```text\n  call\n  ```\n- m1 `edit.path` +0.200\n- m2 `edit.range` -0.050\n**neighbour**\n\n- n1 `past-near` +0.1\n")
+        with tempfile.NamedTemporaryFile("w", suffix="_examples.md", delete=False) as t: t.write(md)
+        rows = parse_examples(t.name); os.unlink(t.name)
+        # the heading and the candidate line inside the task fence are text, not a set; m0 and neighbours are not labelled
+        self.assertEqual([(r["sid"], r["cand"], r["op"]) for r in rows], [("abc:12", "m1", "edit.path"), ("abc:12", "m2", "edit.range")])
 
 
 if __name__ == "__main__":

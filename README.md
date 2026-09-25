@@ -36,24 +36,34 @@ block as the Qwen3 chat template writes it, `call` = the block alone).
 **Scorers.** The CLM head; the raw Qwen3 embeddings (CLM's `clm-raw` ablation); a lexical baseline (share of
 the action's tokens that occur in the state's last 8000 characters).
 
-**Metrics.** Top-1 among 1 + 10 (full sets; chance 1/11 — the same form as CLM's 69.2 % on held-out
-questions with 10 hard negatives), pairwise win rate against each negative (all steps), MRR, p(true), ECE of
-the top probability; per mutation operator and per action type; 95 % intervals from a bootstrap over
-instances.
+**Metrics.** Pairwise win rate of the true action against each negative (pooled over all negatives of all
+steps), top-1 among 1 + 10 (full sets; chance 1/11 — the form of CLM's 69.2 % on held-out questions with 10
+hard negatives), MRR, p(true), ECE of the top probability; per mutation operator and per action type; 95 %
+intervals from a bootstrap over instances.
 
 Tokens, embeddings and heads come from CLM's own code at a pinned commit (`Recipe`, `OfflineBackend`,
 `HeadPair`); `run.py` checks on the first steps that its cut equals `Recipe(max_len)`.
 
-### Reading the result — proposed before the run
+### Reading the result — fixed before the run (2026-09-25)
 
-Primary cell: CLM head, budget 8192, format `turn`, `mutation`.
+Pairwise win rates are pooled over all negatives; intervals are 95 % from a bootstrap over instances.
+`python precheck/analyze.py` computes every step and prints the verdict.
 
-1. **Sanity.** Top-1 on `random` ≥ 0.8. Otherwise suspect the rendering of states or actions, not the model.
-2. **Headroom.** Top-1 on `mutation` ≤ 0.6: clear headroom, go on to the A/B training experiment. ≥ 0.9:
-   little headroom, hard negatives for actions are not the lever. In between: decide on the edit operators
-   (`edit.{old,new,file}.*`), the cleanest negatives.
-3. **Heads.** CLM should beat `raw` and `lexical` on `mutation`; if not, the heads add nothing to this
-   discrimination.
+0. **Cell.** The budget × format with the highest CLM pairwise win rate on `neighbour` sets: the kind closest
+   to CLM's post-training, and independent of the mutations. Everything below is read in this cell.
+1. **Sanity.** CLM top-1 on `random` ≥ 0.8. Otherwise the rendering of states or actions is off: stop there.
+2. **Main number.** CLM pairwise win rate on `mutation`, next to `raw` and `lexical` (if the head does not
+   beat them, it adds nothing to this discrimination).
+3. **Ceiling.** The 60 sets in `<tag>_examples.md` are labelled in `<tag>_audit.csv` (Claude all, Simon 15
+   as a cross-check; agreement and kappa are printed): is a negative as good as the true action? With q the
+   share labelled *same* (unclear = 1/2), a perfect scorer reaches 1 − q/2. Operators with q > 0.3 on at
+   least 10 labels are excluded and fixed before the A/B test.
+4. **Verdict.** Headroom = ceiling − CLM (without flagged operators). Above 5 pp: GO, run the A/B training
+   experiment. Below: STOP, hard negatives for actions are not the lever. If the interval of the headroom
+   contains 5 pp: GREY ZONE, add the reference scorer (Qwen3-8B likelihood p(action | state)) first.
+
+Why not top-1: if a share q of the negatives is as good as the true action, a perfect scorer reaches
+(1 − (1 − q)^11) / (11q) top-1 among 1 + 10 — 0.62 at q = 10 % — but 1 − q/2 = 0.95 pairwise.
 
 ### Known limits
 
@@ -84,8 +94,11 @@ Cluster:
 git clone https://github.com/SiStrebl-TUB/CLM_test.git /work/strebl/CLM_test   # the path the scripts expect
 bash cluster_setup.sh            # once, on a login node
 sbatch cluster_precheck.sh v1    # ~1-2 h on one GPU with >= 24 GB
-python precheck/analyze.py       # after copying exps/precheck/v1.json back
 ```
+
+Back home, with `v1.json`, `v1_items.jsonl.gz`, `v1_examples.md` and `v1_audit.csv` copied to
+`exps/precheck/`: label `v1_audit.csv` (columns `label_a` / `label_b`: same, worse, unclear — reading the sets
+in `v1_examples.md`), then `python precheck/analyze.py`.
 
 ## Layout
 
@@ -93,7 +106,8 @@ python precheck/analyze.py       # after copying exps/precheck/v1.json back
 precheck/data.py      trajectories -> steps, states, action rendering, natural negatives
 precheck/mutate.py    near-miss operators
 precheck/run.py       candidate sets -> CLM recipe -> embeddings -> scores -> exps/precheck/<tag>.*
-precheck/analyze.py   tables from the JSONs
+precheck/audit.py     the sheet for labelling the negatives by hand
+precheck/analyze.py   tables and the decision
 tests/                unit tests (no GPU, no downloads)
 cluster_setup.sh      one-time environment, weights, data
 cluster_precheck.sh   the SLURM job

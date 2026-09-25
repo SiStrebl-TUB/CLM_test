@@ -15,9 +15,11 @@ Scorers: the CLM head (cosine of the projections, times its logit scale for prob
 that occur in the last 8000 characters of the state; independent of the budget, stored with max_len 0).
 
 Per condition, scorer and kind: top-1 among 1 + k (full sets only, chance 1/(k+1)), the pairwise win rate of the
-true action against each negative (ties count 1/2), MRR, the softmax probability of the true action, the ECE of
-the top probability, and win rates per operator / neighbour position. 95 % intervals from a bootstrap over
-instances (the unit that is sampled).
+true action against each negative (pooled over all negatives, ties count 1/2 -- the scale of the ceiling 1 - q/2
+in analyze.py), MRR, the softmax probability of the true action, the ECE of the top probability, and win rates
+per operator / neighbour position. 95 % intervals from a bootstrap over instances (the unit that is sampled).
+Besides the JSON: per-candidate scores (<tag>_items.jsonl.gz), 60 sets to read (<tag>_examples.md) and the sheet
+to label them (<tag>_audit.csv, see precheck/audit.py).
 
 Tokens, embeddings and heads come from CLM's own code (external/CLM at the pinned commit): states through
 Recipe.state_ids (chat template, last max_len - 1 tokens), actions through Recipe.text_ids(keep="head"), the
@@ -33,6 +35,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT)
 from precheck.data import FORMATS, TOOLS, category, download, neighbours, random_negatives, read_parquet, read_rows_json, render_action, state_blob, state_messages, steps_of
 from precheck.mutate import context, mutations
+from precheck.audit import write_sheet
 
 CLM_DIR = os.path.join(ROOT, "external", "CLM")
 KINDS = ("random", "neighbour", "mutation")
@@ -145,15 +148,20 @@ def softmax(x):
     e = np.exp(x - x.max()); return e / e.sum()
 
 
-def boot(values, groups, n_boot, seed=0):
-    """mean and 95 % interval, resampling instances"""
+def boot_draws(values, groups, n_boot, seed=0):
+    """mean and n_boot bootstrap means, resampling groups (instances) with replacement"""
     v = np.asarray(values, float)
-    if len(v) == 0: return None, None
     _, inv = np.unique(np.asarray(groups), return_inverse=True)
     sums, cnts = np.bincount(inv, weights=v), np.bincount(inv)
     idx = np.random.default_rng(seed).integers(0, len(sums), size=(n_boot, len(sums)))
-    st = sums[idx].sum(1) / cnts[idx].sum(1)
-    return float(v.mean()), [float(np.percentile(st, 2.5)), float(np.percentile(st, 97.5))]
+    return float(v.mean()), sums[idx].sum(1) / cnts[idx].sum(1)
+
+
+def boot(values, groups, n_boot, seed=0):
+    """mean and 95 % interval, resampling instances"""
+    if len(values) == 0: return None, None
+    m, st = boot_draws(values, groups, n_boot, seed)
+    return m, [float(np.percentile(st, 2.5)), float(np.percentile(st, 97.5))]
 
 
 def ece(conf, correct, bins=10):
@@ -163,9 +171,12 @@ def ece(conf, correct, bins=10):
 
 
 def by(recs, key, field):
+    """mean of a per-step field (a list field is pooled: pairwise wins per negative) for each value of key"""
     d = {}
     for r in recs:
-        if r[field] is not None: d.setdefault(r[key], []).append(r[field])
+        if r[field] is None: continue
+        if isinstance(r[field], list): d.setdefault(r[key], []).extend(r[field])
+        else: d.setdefault(r[key], []).append(r[field])
     return {k: {"mean": float(np.mean(v)), "n": len(v)} for k, v in sorted(d.items(), key=lambda kv: str(kv[0]))}
 
 
@@ -180,12 +191,12 @@ def summarize(items, scores, scales, args):
             full = len(sn) == args.k
             top = (1.0 if s0 > sn.max() else 1.0 / (1 + (sn == s0).sum()) if s0 == sn.max() else 0.0) if full else None
             p = softmax(scales[scorer] * s) if scorer in scales else None
-            recs.append(dict(g=it["instance"], pw=wins.mean(), rr=1.0 / (1 + (sn > s0).sum() + 0.5 * (sn == s0).sum()), top=top,
+            recs.append(dict(g=it["instance"], pw=wins.tolist(), rr=1.0 / (1 + (sn > s0).sum() + 0.5 * (sn == s0).sum()), top=top,
                              p=None if p is None else p[0], conf=None if p is None or not full else p.max(), cat=it["category"],
                              sub=it["sub"], trunc=("truncated" if it["n_tokens"] > L - 1 else "complete") if L else "n/a"))
             for (op, _), w in zip(it["cands"][kd][1:], wins): ops.setdefault(op, ([], []))[0].append(w); ops[op][1].append(it["instance"])
         tops = [r for r in recs if r["top"] is not None]; confs = [r for r in tops if r["conf"] is not None]
-        pw, pw_ci = boot([r["pw"] for r in recs], [r["g"] for r in recs], args.n_boot)
+        pw, pw_ci = boot([w for r in recs for w in r["pw"]], [r["g"] for r in recs for _ in r["pw"]], args.n_boot)   # per negative
         t1, t1_ci = boot([r["top"] for r in tops], [r["g"] for r in tops], args.n_boot)
         res.append(dict(max_len=L, format=fmt, scorer=scorer, kind=kd, n=len(recs), n_full=len(tops), chance=1.0 / (args.k + 1),
                         top1=t1, top1_ci=t1_ci, pairwise=pw, pairwise_ci=pw_ci, mrr=float(np.mean([r["rr"] for r in recs])) if recs else None,
@@ -222,8 +233,9 @@ def write_examples(path, items, scores, key, n=60, seed=0):
     for idx in sorted(random.Random(seed).sample(range(len(items)), min(n, len(items)))):
         it = items[idx]
         task = next((m["content"] for m in it["msgs"] if m["role"] == "user"), "")
-        lines += [f"## {it['sid']}  ({it['sub']}, {it['n_tokens']} state tokens)\n", "Task, first 1500 characters:\n", "```text", task[:1500], "```\n",
-                  "State, last 3000 characters:\n", "```text", it["blob"][-3000:], "```\n"]
+        # ~~~~ fences: issues and observations contain ``` blocks of their own
+        lines += [f"## {it['sid']}  ({it['sub']}, {it['n_tokens']} state tokens)\n", "Task, first 1500 characters:\n", "~~~~text", task[:1500], "~~~~\n",
+                  "State, last 3000 characters:\n", "~~~~text", it["blob"][-3000:], "~~~~\n"]
         for kd, tag in (("mutation", "m"), ("neighbour", "n")):
             s = scores[(*key, kd)][idx]
             lines.append(f"**{kd}**\n")
@@ -301,10 +313,11 @@ def main():
     with gzip.open(tag + "_items.jsonl.gz", "wt") as f:
         for idx, it in enumerate(items):
             sets = {kd: {"ops": [op for op, _ in it["cands"][kd]],
-                         "scores": {f"{L}|{fmt}|{sc}": [round(float(v), 5) for v in S[idx]] for (L, fmt, sc, k2), S in scores.items() if k2 == kd}} for kd in KINDS}
+                         "scores": {f"{L}|{fmt}|{sc}": [round(float(v), 7) for v in S[idx]] for (L, fmt, sc, k2), S in scores.items() if k2 == kd}} for kd in KINDS}
             f.write(json.dumps({k: it[k] for k in ("sid", "instance", "tool", "sub", "category", "msg_idx", "n_tokens")} | {"sets": sets}) + "\n")
     primary = (max(args.max_lens), args.formats[0], "clm")
     write_examples(tag + "_examples.md", items, scores, primary, args.n_examples)
+    write_sheet(tag + "_examples.md")
     for L in sorted(args.max_lens, reverse=True):
         for fmt in args.formats: print_table(res, L, fmt)
     print(f"\nwritten {tag}.json, {tag}_items.jsonl.gz, {tag}_examples.md  ({config['minutes']} min)")
