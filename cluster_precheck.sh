@@ -18,6 +18,7 @@
 # Qwen3-8B in bf16 needs a GPU with >= 24 GB (no ccc:75). Run cluster_setup.sh once before.
 # Output: exps/precheck/<tag>.json, <tag>_items.jsonl.gz, <tag>_examples.md; tables: python precheck/analyze.py
 module load cuda/13.0.1
+eval "$(conda shell.bash hook)"
 conda activate "${CLM_ENV:-/work/strebl/clm_env}"
 export XDG_CACHE_HOME="/work/strebl/.cache" HF_HOME="/work/strebl/.cache/huggingface" CLM_CKPT_DIR="/work/strebl/.cache/clm"
 cd /work/strebl/CLM_test

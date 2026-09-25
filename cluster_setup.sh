@@ -15,7 +15,9 @@ cd /work/strebl/CLM_test
 export XDG_CACHE_HOME="/work/strebl/.cache" HF_HOME="/work/strebl/.cache/huggingface" CLM_CKPT_DIR="/work/strebl/.cache/clm"
 
 [ -d "$ENV" ] || conda create -y -p "$ENV" python=3.12
-conda activate "$ENV"
+# `bash cluster_setup.sh` ignores the --login shebang, so conda's shell function is not defined: load it
+eval "$(conda shell.bash hook)"
+set +u; conda activate "$ENV"; set -u      # activation scripts may read unset variables
 pip install --upgrade pip
 # runner="pooling" (CLM's OfflineBackend) needs a recent vLLM; its wheel brings a matching torch
 pip install "vllm>=0.11" pyarrow "huggingface_hub[cli]"
