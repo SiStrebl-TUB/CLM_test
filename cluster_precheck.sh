@@ -20,7 +20,7 @@
 module load cuda/13.0.1
 conda activate "${CLM_ENV:-/work/strebl/clm_env}"
 export XDG_CACHE_HOME="/work/strebl/.cache" HF_HOME="/work/strebl/.cache/huggingface" CLM_CKPT_DIR="/work/strebl/.cache/clm"
-cd /work/strebl/CLMHardNegatives
+cd /work/strebl/CLM_test
 export PYTHONPATH=.
 mkdir -p logs exps/precheck
 python -c "import ast; [ast.parse(open(f).read()) for f in ('precheck/run.py', 'precheck/data.py', 'precheck/mutate.py')]" || { echo "scripts do not parse"; exit 1; }

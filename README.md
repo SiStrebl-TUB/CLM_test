@@ -81,6 +81,7 @@ python precheck/run.py --rows-json /tmp/rows.json --all-trajectories --dry-run -
 Cluster:
 
 ```bash
+git clone https://github.com/SiStrebl-TUB/CLM_test.git /work/strebl/CLM_test   # the path the scripts expect
 bash cluster_setup.sh            # once, on a login node
 sbatch cluster_precheck.sh v1    # ~1-2 h on one GPU with >= 24 GB
 python precheck/analyze.py       # after copying exps/precheck/v1.json back

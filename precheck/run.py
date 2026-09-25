@@ -214,17 +214,21 @@ def print_table(res, L, fmt):
             print(f"    {op:24s} n={d['n']:5d}  {fmt_ci(d['pairwise'], d['ci'])}")
 
 
-def write_examples(path, items, scores, key, n=20, seed=0):
-    """a readable sample for checking the negatives by hand (are some mutations just as right?)"""
-    lines = [f"# Candidate sets, scores from {key}\n"]
+def write_examples(path, items, scores, key, n=60, seed=0):
+    """a readable sample for checking the negatives by hand: is a negative as good as the true action (m0 / n0)?
+    Label the ids (m3: as good / worse / unclear); the share labelled "as good" bounds what any scorer can reach.
+    The task is shown for the reader -- at 8192 tokens the model sees it only in the few states that fit."""
+    lines = [f"# Candidate sets, scores from {key}; m0 / n0 is the true action\n"]
     for idx in sorted(random.Random(seed).sample(range(len(items)), min(n, len(items)))):
         it = items[idx]
-        lines += [f"## {it['sid']}  ({it['sub']}, {it['n_tokens']} state tokens)\n", "State, last 1200 characters:\n", "```text", it["blob"][-1200:], "```\n"]
-        for kd in ("mutation", "neighbour"):
+        task = next((m["content"] for m in it["msgs"] if m["role"] == "user"), "")
+        lines += [f"## {it['sid']}  ({it['sub']}, {it['n_tokens']} state tokens)\n", "Task, first 1500 characters:\n", "```text", task[:1500], "```\n",
+                  "State, last 3000 characters:\n", "```text", it["blob"][-3000:], "```\n"]
+        for kd, tag in (("mutation", "m"), ("neighbour", "n")):
             s = scores[(*key, kd)][idx]
-            lines.append(f"**{kd}** (true action first)\n")
-            for (op, a), v in list(zip(it["cands"][kd], s))[: (len(s) if kd == "mutation" else 4)]:
-                lines.append(f"- `{op}` {v:+.3f}\n  ```text\n  " + render_action(a, "call")[:500].replace("\n", "\n  ") + "\n  ```")
+            lines.append(f"**{kd}**\n")
+            for j, ((op, a), v) in enumerate(list(zip(it["cands"][kd], s))[: (len(s) if kd == "mutation" else 5)]):
+                lines.append(f"- {tag}{j} `{op}` {v:+.3f}\n  ```text\n  " + render_action(a, "call")[:600].replace("\n", "\n  ") + "\n  ```")
             lines.append("")
     open(path, "w").write("\n".join(lines))
 
@@ -254,7 +258,7 @@ def main():
     ap.add_argument("--gpu-mem", type=float, default=0.85); ap.add_argument("--n-boot", type=int, default=1000); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true", help="stand-ins for tokenizer, encoder and head: tests the pipeline without a GPU")
     ap.add_argument("--fake-encoder", action="store_true", help="real tokenizer and head, random encoder: tests everything but vLLM, on a CPU")
-    ap.add_argument("--tag", default="v1"); ap.add_argument("--out-dir", default="exps/precheck")
+    ap.add_argument("--tag", default="v1"); ap.add_argument("--out-dir", default="exps/precheck"); ap.add_argument("--n-examples", type=int, default=60)
     args = ap.parse_args()
     t0 = time.time(); os.makedirs(args.out_dir, exist_ok=True)
 
@@ -300,7 +304,7 @@ def main():
                          "scores": {f"{L}|{fmt}|{sc}": [round(float(v), 5) for v in S[idx]] for (L, fmt, sc, k2), S in scores.items() if k2 == kd}} for kd in KINDS}
             f.write(json.dumps({k: it[k] for k in ("sid", "instance", "tool", "sub", "category", "msg_idx", "n_tokens")} | {"sets": sets}) + "\n")
     primary = (max(args.max_lens), args.formats[0], "clm")
-    write_examples(tag + "_examples.md", items, scores, primary)
+    write_examples(tag + "_examples.md", items, scores, primary, args.n_examples)
     for L in sorted(args.max_lens, reverse=True):
         for fmt in args.formats: print_table(res, L, fmt)
     print(f"\nwritten {tag}.json, {tag}_items.jsonl.gz, {tag}_examples.md  ({config['minutes']} min)")

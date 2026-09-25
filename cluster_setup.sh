@@ -11,7 +11,7 @@ set -euo pipefail
 module load cuda/13.0.1
 ENV="${CLM_ENV:-/work/strebl/clm_env}"
 CLM_COMMIT=bb42c6c5bf914fd449bed2f6ca65be80602cb1f7
-cd /work/strebl/CLMHardNegatives
+cd /work/strebl/CLM_test
 export XDG_CACHE_HOME="/work/strebl/.cache" HF_HOME="/work/strebl/.cache/huggingface" CLM_CKPT_DIR="/work/strebl/.cache/clm"
 
 [ -d "$ENV" ] || conda create -y -p "$ENV" python=3.12
