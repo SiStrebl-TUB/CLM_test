@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+
+# CLM's code (cloned by cluster_setup.sh at a pinned commit), downloads, logs
+external/
+exps/precheck/data/
+logs/
+*.parquet
+*.pt
+
+# per-step scores are ~10 MB per run: copied back, not committed
+*_items.jsonl.gz
